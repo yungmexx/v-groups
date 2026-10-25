@@ -1,6 +1,7 @@
 let groupMembers = []
 let groupLeaderId = null
 let myServerId = null
+let maxGroupSize = 4
 
 let myName = "Unknown"
 let leaderName = "Unknown"
@@ -15,6 +16,26 @@ let currentInviteGroup = null
 
 let currentGroupId = null
 
+// Names come from players, never put them in innerHTML unescaped
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;")
+}
+
+function post(endpoint, body) {
+    return fetch(`https://${GetParentResourceName()}/${endpoint}`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body || {})
+    }).catch(() => {})
+}
+
 function renderGroupMembers() {
     document.querySelector(".my-avatar").innerHTML = `
           <div class="member-avatar">
@@ -26,6 +47,7 @@ function renderGroupMembers() {
     groupMembers.forEach(member => {
         if (!member || typeof member !== "object") return
         const isMemberLeader = member.id === groupLeaderId
+        const isMe = member.id === myServerId
         const div = document.createElement("div")
         div.className = "member-card"
         div.innerHTML = `
@@ -35,67 +57,46 @@ function renderGroupMembers() {
             </div>
                 <div class="member-info">
                     <h3>
-                        ${member.id === groupLeaderId ? leaderName : member.name}
+                        ${escapeHtml(isMemberLeader ? leaderName : member.name)}
                     </h3>
                     <span>
-                        ${member.id === groupLeaderId ? `Group Leader` : "Group Member"} &nbsp;·&nbsp; ID: ${member.id}
+                        ${isMemberLeader ? `Group Leader` : "Group Member"} &nbsp;·&nbsp; ID: ${escapeHtml(member.id)}
                     </span>
                 </div>
             </div>
             <div class="member-right">
                 ${
-                    member.id === groupLeaderId ? `<div class="leader-tag">Leader</div>` : ``
+                    isMemberLeader ? `<div class="leader-tag">Leader</div>` : ``
                 }
                 ${isLeader && !isMemberLeader ? `
-                    <button class="kick-btn" data-id="${member.id}">
+                    <button class="kick-btn">
                         Kick
                     </button>
                 ` : ``}
-                ${member.id === myServerId && !member.leader ? `
-                    <button class="kick-btn leave-btn" data-id="${member.id}">
+                ${isMe && groupMembers.length > 1 ? `
+                    <button class="kick-btn leave-btn">
                         Leave
                     </button>
                 ` : ``}
             </div>
         `
-        const kickBtn = div.querySelector(".kick-btn")
+        const kickBtn = div.querySelector(".kick-btn:not(.leave-btn)")
         const leaveBtn = div.querySelector(".leave-btn")
         if (leaveBtn) {
             leaveBtn.addEventListener("click", () => {
-                fetch(`https://${GetParentResourceName()}/leaveGroup`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-
-                    body: JSON.stringify({
-                        playerId: member.id,
-                        groupId: currentGroupId
-                    })
-
-                   // body: JSON.stringify({})
-                })
+                post("leaveGroup", {})
             })
         }
         if (kickBtn) {
             kickBtn.addEventListener("click", () => {
-                fetch(`https://${GetParentResourceName()}/kickPlayer`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        playerId: member.id,
-                        groupId: currentGroupId
-                    })
+                post("kickPlayer", {
+                    playerId: member.id
                 })
-
             })
-
         }
         groupMembersEl.appendChild(div)
     })
-    groupCountEl.innerText = `${groupMembers.length} / 4`
+    groupCountEl.innerText = `${groupMembers.length} / ${maxGroupSize}`
 }
 
 function renderNearbyPlayers(players) {
@@ -111,24 +112,25 @@ function renderNearbyPlayers(players) {
         `
         return
     }
+    const groupFull = groupMembers.length >= maxGroupSize
     players.forEach(player => {
         const div = document.createElement("div")
         div.className = "player-card"
         let status = player.status || "invite"
         let btnLabel = status.charAt(0).toUpperCase() + status.slice(1)
-        let disabled = status !== "invite" ? "disabled" : ""
+        let disabled = status !== "invite" || groupFull ? "disabled" : ""
         div.innerHTML = `
                 <div class="player-left">
                     <div class="member-avatar">
                         <img src="assets/player.png" alt="avatar">
                     </div>
                     <div class="player-info">
-                        <h2>${player.name}</h2>
-                        <span>ID: ${player.id} &nbsp;·&nbsp; ${player.distance}m Away</span>
+                        <h2>${escapeHtml(player.name)}</h2>
+                        <span>ID: ${escapeHtml(player.id)} &nbsp;·&nbsp; ${escapeHtml(player.distance)}m Away</span>
                     </div>
                 </div>
                 <button class="invite-btn" ${disabled}>
-                    ${btnLabel}
+                    ${escapeHtml(btnLabel)}
                 </button>
             `
 
@@ -136,17 +138,10 @@ function renderNearbyPlayers(players) {
         div.querySelector(".invite-btn")
             .addEventListener("click", (e) => {
 
-                if (player.status === "invited") return
+                if (status !== "invite" || groupFull) return
 
-                fetch(`https://${GetParentResourceName()}/invitePlayer`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        playerId: player.id,
-                        groupId: currentGroupId
-                    })
+                post("invitePlayer", {
+                    playerId: player.id
                 })
 
             })
@@ -178,8 +173,10 @@ window.addEventListener("message", (event) => {
 
         groupLeaderId = data.leader
         leaderName = data.leaderName
+        if (data.maxSize) maxGroupSize = data.maxSize
+        if (data.myId != null) myServerId = data.myId
 
-        currentGroupId = data.leader
+        currentGroupId = data.groupId ?? null
 
         renderGroupMembers()
     }
@@ -189,28 +186,24 @@ window.addEventListener("message", (event) => {
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
 
-        fetch(`https://${GetParentResourceName()}/close`, {
-            method: "POST"
-        })
+        post("close")
 
         const inviteVisible = !invitePopup.classList.contains("hidden")
 
         if (inviteVisible && currentInviteGroup) {
 
-            fetch(`https://${GetParentResourceName()}/declineInvite`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    groupId: currentInviteGroup
-                })
+            post("declineInvite", {
+                groupId: currentInviteGroup
             })
 
             invitePopup.classList.add("hidden")
 
             currentInviteGroup = null
         }
+    }
+
+    if (e.key === "Shift" && !e.repeat) {
+        post("toggleMouse")
     }
 })
 
@@ -229,6 +222,7 @@ window.addEventListener("message", (event) => {
 
     if (data.action === "hideInvite") {
         invitePopup.classList.add("hidden")
+        currentInviteGroup = null
     }
 
     if (data.action === "setMyId") {
@@ -249,31 +243,21 @@ window.addEventListener("message", (event) => {
 
 document.getElementById("acceptBtn")
     .addEventListener("click", () => {
-        fetch(`https://${GetParentResourceName()}/acceptInvite`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                groupId: currentInviteGroup
-            })
+        post("acceptInvite", {
+            groupId: currentInviteGroup
         })
         invitePopup.classList.add("hidden")
+        currentInviteGroup = null
     })
 
 document.getElementById("declineBtn")
     .addEventListener("click", () => {
 
-        fetch(`https://${GetParentResourceName()}/declineInvite`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                groupId: currentInviteGroup
-            })
+        post("declineInvite", {
+            groupId: currentInviteGroup
         })
 
         invitePopup.classList.add("hidden")
+        currentInviteGroup = null
 
     })
