@@ -4,12 +4,15 @@ local nearbyCache = {}
 local activeIds = {}
 local groupMembers = {}
 local playerNames = {}
+local pendingNames = {}
 local currentLeaderId = nil
 
 
 local currentLeaderName = nil
+local currentMaxSize = 4
 local playerStatus = {}
 local currentInviterId = nil
+local currentInviteGroup = nil
 local currentGroupId = nil
 local cursorActive = true
 
@@ -71,7 +74,8 @@ local function updateNearbyPlayers()
                 nearbyCache[#nearbyCache + 1] = { ped = targetPed, id = serverId }
                 if not isInGroup(serverId) then
                     local inviteState = playerStatus[serverId] or "invite"
-                    if not playerNames[serverId] then
+                    if not playerNames[serverId] and not pendingNames[serverId] then
+                        pendingNames[serverId] = true
                         TriggerServerEvent("group:server:getNearbyName", serverId)
                     end
                     local name = playerNames[serverId] or GetPlayerName(player) or ("ID: " .. serverId)
@@ -79,7 +83,7 @@ local function updateNearbyPlayers()
                         id = serverId,
                         name = name or "Unknown",
                         distance = math.floor(math.sqrt(distSq) * 10) / 10,
-                        status = inviteState or nil
+                        status = inviteState
                     }
                     table.insert(nearbyPlayers, data)
                 end
@@ -89,6 +93,9 @@ local function updateNearbyPlayers()
 
     for id in pairs(playerNames) do
         if not activeIds[id] then playerNames[id] = nil end
+    end
+    for id in pairs(pendingNames) do
+        if not activeIds[id] then pendingNames[id] = nil end
     end
     for id in pairs(playerStatus) do
         if not activeIds[id] then playerStatus[id] = nil end
@@ -100,25 +107,33 @@ local function updateNearbyPlayers()
     })
 end
 
-local function toggleGroup()
-    isUiOpen = not isUiOpen
+local function setUiOpen(state)
+    isUiOpen = state
     cursorActive = true
     SetNuiFocus(isUiOpen, isUiOpen)
+    SetNuiFocusKeepInput(false)
     SendNUIMessage({
         action = "toggle",
         state = isUiOpen
     })
     if isUiOpen then
-        TriggerServerEvent("group:server:requestGroup")
         SendNUIMessage({
             action = "setMyId",
             id = GetPlayerServerId(PlayerId())
         })
-        Wait(100)
+        TriggerServerEvent("group:server:requestGroup")
         updateNearbyPlayers()
     else
+        if currentInviterId then
+            -- keep the cursor for a pending invite popup
+            SetNuiFocus(true, true)
+        end
         collectgarbage("collect")
     end
+end
+
+local function toggleGroup()
+    setUiOpen(not isUiOpen)
 end
 
 
@@ -126,84 +141,90 @@ local function resetInvites()
     playerStatus = {}
 end
 
+-- Called when we leave/are kicked; the server sends our new solo group right after
+local function resetGroupState()
+    resetInvites()
+    groupMembers = {}
+    currentLeaderId = nil
+    currentLeaderName = nil
+    currentGroupId = nil
+end
+
+-- Closes the invite popup and releases focus if the panel is not open
+local function closeInvitePopup()
+    currentInviteGroup = nil
+    currentInviterId = nil
+    SendNUIMessage({
+        action = "hideInvite"
+    })
+    if not isUiOpen then
+        SetNuiFocus(false, false)
+    end
+end
+
+local function requestGroup()
+    TriggerServerEvent("group:server:requestGroup")
+end
 
 
---  ███╗░░██╗██╗░░░██╗██╗  ░█████╗░░█████╗░██╗░░░░░██╗░░░░░██████╗░░█████╗░░█████╗░██╗░░██╗
---  ████╗░██║██║░░░██║██║  ██╔══██╗██╔══██╗██║░░░░░██║░░░░░██╔══██╗██╔══██╗██╔══██╗██║░██╔╝
---  ██╔██╗██║██║░░░██║██║  ██║░░╚═╝███████║██║░░░░░██║░░░░░██████╦╝███████║██║░░╚═╝█████═╝░
---  ██║╚████║██║░░░██║██║  ██║░░██╗██╔══██║██║░░░░░██║░░░░░██╔══██╗██╔══██║██║░░██╗██╔═██╗░
---  ██║░╚███║╚██████╔╝██║  ╚█████╔╝██║░░██║███████╗███████╗██████╦╝██║░░██║╚█████╔╝██║░╚██╗
---  ╚═╝░░╚══╝░╚═════╝░╚═╝  ░╚════╝░╚═╝░░╚═╝╚══════╝╚══════╝╚═════╝░╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝
+
+--  ███╗░░██╗██╗░░░██╗██╗  ░█████╗░░█████╗░██╗░░░░░██╗░░░░░██████╗░░█████╗░░█████╗░██╗░░██╗
+--  ████╗░██║██║░░░██║██║  ██╔══██╗██╔══██╗██║░░░░░██║░░░░░██╔══██╗██╔══██╗██╔══██╗██║░██╔╝
+--  ██╔██╗██║██║░░░██║██║  ██║░░╚═╝███████║██║░░░░░██║░░░░░██████╦╝███████║██║░░╚═╝█████═╝░
+--  ██║╚████║██║░░░██║██║  ██║░░██╗██╔══██║██║░░░░░██║░░░░░██╔══██╗██╔══██║██║░░██╗██╔═██╗░
+--  ██║░╚███║╚██████╔╝██║  ╚█████╔╝██║░░██║███████╗███████╗██████╦╝██║░░██║╚█████╔╝██║░╚██╗
+--  ╚═╝░░╚══╝░╚═════╝░╚═╝  ░╚════╝░╚═╝░░╚═╝╚══════╝╚══════╝╚═════╝░╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝
 
 RegisterNUICallback("close", function(_, cb)
-    isUiOpen = false
-    cursorActive = true
-    SetNuiFocus(false, false)
-    SendNUIMessage({
-        action = "toggle",
-        state = false
-    })
-    collectgarbage("collect")
+    if isUiOpen then
+        setUiOpen(false)
+    elseif not currentInviterId then
+        SetNuiFocus(false, false)
+    end
     cb("ok")
 end)
 
+-- Shift: hide the cursor and give movement back without closing the panel
 RegisterNUICallback("toggleMouse", function(_, cb)
     if isUiOpen then
         cursorActive = not cursorActive
         SetNuiFocus(true, cursorActive)
+        SetNuiFocusKeepInput(not cursorActive)
     end
     cb("ok")
 end)
 
 RegisterNUICallback("invitePlayer", function(data, cb)
-    local playerId = data.playerId
+    local playerId = tonumber(data.playerId)
 
-    TriggerServerEvent(
-        "group:server:invitePlayer",
-        playerId
-    )
+    if playerId then
+        TriggerServerEvent(
+            "group:server:invitePlayer",
+            playerId
+        )
+    end
 
     cb("ok")
 end)
 
 
 RegisterNUICallback("acceptInvite", function(data, cb)
-    if not isUiOpen then
-        SetNuiFocus(false, false)
+    if currentInviterId then
+        TriggerServerEvent("group:server:acceptInvite")
     end
 
-    TriggerServerEvent(
-        "group:server:acceptInvite",
-        data.groupId
-    )
-
-    SendNUIMessage({
-        action = "hideInvite"
-    })
-
+    closeInvitePopup()
     cb("ok")
 end)
 
 
 RegisterNUICallback("declineInvite", function(data, cb)
-    if not isUiOpen then
-        SetNuiFocus(false, false)
-    end
-
     if currentInviterId then
-        TriggerServerEvent(
-            "group:server:declineInvite",
-            currentInviterId
-        )
+        TriggerServerEvent("group:server:declineInvite")
         TriggerEvent('v-groups:client:SendNotification', 'You have declined the invite', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
     end
 
-    SendNUIMessage({
-        action = "hideInvite"
-    })
-
-    currentInviteGroup = nil
-    currentInviterId = nil
+    closeInvitePopup()
     cb("ok")
 end)
 
@@ -213,22 +234,29 @@ RegisterNUICallback("leaveGroup", function(data, cb)
 end)
 
 RegisterNUICallback("kickPlayer", function(data, cb)
-    TriggerServerEvent("group:server:kickPlayer", data.playerId)
+    local playerId = tonumber(data.playerId)
+    if playerId then
+        TriggerServerEvent("group:server:kickPlayer", playerId)
+    end
     cb("ok")
 end)
 
 
---  ███╗░░██╗███████╗████████╗  ███████╗██╗░░░██╗███████╗███╗░░██╗████████╗
---  ████╗░██║██╔════╝╚══██╔══╝  ██╔════╝██║░░░██║██╔════╝████╗░██║╚══██╔══╝
---  ██╔██╗██║█████╗░░░░░██║░░░  █████╗░░╚██╗░██╔╝█████╗░░██╔██╗██║░░░██║░░░
---  ██║╚████║██╔══╝░░░░░██║░░░  ██╔══╝░░░╚████╔╝░██╔══╝░░██║╚████║░░░██║░░░
---  ██║░╚███║███████╗░░░██║░░░  ███████╗░░╚██╔╝░░███████╗██║░╚███║░░░██║░░░
---  ╚═╝░░╚══╝╚══════╝░░░╚═╝░░░  ╚══════╝░░░╚═╝░░░╚══════╝╚═╝░░╚══╝░░░╚═╝░░░
+--  ███╗░░██╗███████╗████████╗  ███████╗██╗░░░██╗███████╗███╗░░██╗████████╗
+--  ████╗░██║██╔════╝╚══██╔══╝  ██╔════╝██║░░░██║██╔════╝████╗░██║╚══██╔══╝
+--  ██╔██╗██║█████╗░░░░░██║░░░  █████╗░░╚██╗░██╔╝█████╗░░██╔██╗██║░░░██║░░░
+--  ██║╚████║██╔══╝░░░░░██║░░░  ██╔══╝░░░╚████╔╝░██╔══╝░░██║╚████║░░░██║░░░
+--  ██║░╚███║███████╗░░░██║░░░  ███████╗░░╚██╔╝░░███████╗██║░╚███║░░░██║░░░
+--  ╚═╝░░╚══╝╚══════╝░░░╚═╝░░░  ╚══════╝░░░╚═╝░░░╚══════╝╚═╝░░╚══╝░░░╚═╝░░░
 
 RegisterNetEvent("group:client:receiveInvite", function(fromName, groupId, inviterId)
     currentInviteGroup = groupId
     currentInviterId = inviterId
 
+    if isUiOpen then
+        cursorActive = true
+        SetNuiFocusKeepInput(false)
+    end
     SetNuiFocus(true, true)
 
     SendNUIMessage({
@@ -240,9 +268,14 @@ RegisterNetEvent("group:client:receiveInvite", function(fromName, groupId, invit
     TriggerEvent('v-groups:client:SendNotification', 'You have received an invite', 'success', 'bottom', '#141517', '#C1C2C5', 'check', 'green')
 end)
 
+-- Invite expired, or the inviter left/disconnected
+RegisterNetEvent("group:client:inviteCancelled", function()
+    if not currentInviterId then return end
+    closeInvitePopup()
+end)
 
-RegisterNetEvent("group:client:updateGroup")
-AddEventHandler("group:client:updateGroup", function(groupData, leaderId, leaderName, maxSize, groupId)
+
+RegisterNetEvent("group:client:updateGroup", function(groupData, leaderId, leaderName, maxSize, groupId)
     local myId = GetPlayerServerId(PlayerId())
     if not leaderId then
         leaderId = myId
@@ -251,85 +284,75 @@ AddEventHandler("group:client:updateGroup", function(groupData, leaderId, leader
     groupMembers = groupData or {}
     currentLeaderId = leaderId
     currentLeaderName = leaderName
+    currentMaxSize = maxSize or currentMaxSize
     currentGroupId = groupId or currentGroupId
     SendNUIMessage({
         action = "setGroupMembers",
         members = groupMembers,
         leader = currentLeaderId,
         leaderName = currentLeaderName,
-        maxSize = maxSize
+        maxSize = currentMaxSize,
+        groupId = currentGroupId,
+        myId = myId
     })
-    updateNearbyPlayers()
+    if isUiOpen then
+        updateNearbyPlayers()
+    end
 end)
 
 RegisterNetEvent("group:client:inviteStatus", function(playerId, status)
-    if not status then
-        playerStatus[playerId] = nil
-    else
-        playerStatus[playerId] = status
+    playerStatus[playerId] = status
+    if isUiOpen then
+        updateNearbyPlayers()
     end
-    updateNearbyPlayers()
 end)
 
 RegisterNetEvent("group:client:leftGroup", function()
-    resetInvites()
-    groupMembers = {}
-    groupLeaderId = nil
-    currentLeaderId = nil
-    currentLeaderName = nil
-    currentGroupId = nil
-    SendNUIMessage({
-        action = "setGroupMembers",
-        members = {},
-        leader = nil,
-        leaderName = nil
-    })
-    TriggerServerEvent("group:server:requestGroup")
-    SendNUIMessage({
-        action = "setMyId",
-        id = GetPlayerServerId(PlayerId())
-    })
-    Wait(100)
-    updateNearbyPlayers()
+    resetGroupState()
 end)
 
 
 RegisterNetEvent("group:client:receiveNearbyName", function(playerId, name)
     playerNames[playerId] = name
+    pendingNames[playerId] = nil
 end)
 
 
 RegisterNetEvent("group:client:kicked", function()
-    resetInvites()
-    groupMembers = {}
-    groupLeaderId = nil
-    currentLeaderId = nil
-    currentLeaderName = nil
-    currentGroupId = nil
-    SendNUIMessage({
-        action = "setGroupMembers",
-        members = {},
-        leader = nil,
-        leaderName = nil
-    })
-    TriggerServerEvent("group:server:requestGroup")
-    SendNUIMessage({
-        action = "setMyId",
-        id = GetPlayerServerId(PlayerId())
-    })
-    Wait(100)
-    updateNearbyPlayers()
+    resetGroupState()
+end)
+
+
+-- Make sure we are always in a group (as host of our own one by default)
+AddEventHandler("onClientResourceStart", function(resource)
+    if resource == GetCurrentResourceName() then
+        requestGroup()
+    end
+end)
+
+AddEventHandler("playerSpawned", requestGroup)
+RegisterNetEvent("QBCore:Client:OnPlayerLoaded", requestGroup)
+RegisterNetEvent("esx:playerLoaded", function()
+    requestGroup()
+end)
+
+-- Release NUI focus if the resource is restarted while the panel is open
+AddEventHandler("onResourceStop", function(resource)
+    if resource == GetCurrentResourceName() and (isUiOpen or currentInviterId) then
+        SetNuiFocus(false, false)
+        SetNuiFocusKeepInput(false)
+    end
 end)
 
 
 
 
---  ░█████╗░██████╗░███████╗░█████╗░████████╗███████╗  ████████╗██╗░░██╗██████╗░███████╗░█████╗░██████╗░
---  ██╔══██╗██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔════╝  ╚══██╔══╝██║░░██║██╔══██╗██╔════╝██╔══██╗██╔══██╗
---  ██║░░╚═╝██████╔╝█████╗░░███████║░░░██║░░░█████╗░░  ░░░██║░░░███████║██████╔╝█████╗░░███████║██║░░██║
---  ██║░░██╗██╔══██╗██╔══╝░░██╔══██║░░░██║░░░██╔══╝░░  ░░░██║░░░██╔══██║██╔══██╗██╔══╝░░██╔══██║██║░░██║
---  ╚█████╔╝██║░░██║███████╗██║░░██║░░░██║░░░███████╗  ░░░██║░░░██║░░██║██║░░██║███████╗██║░░██║██████╔╝
---  ░╚════╝░╚═╝░░╚═╝╚══════╝╚═╝░░╚═╝░░░╚═╝░░░╚══════╝  ░░░╚═╝░░░╚═╝░░╚═╝╚═╝░░╚═╝╚══════╝╚═╝░░╚═╝╚═════╝░
+--  ░█████╗░██████╗░███████╗░█████╗░████████╗███████╗  ████████╗██╗░░██╗██████╗░███████╗░█████╗░██████╗░
+--  ██╔══██╗██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔════╝  ╚══██╔══╝██║░░██║██╔══██╗██╔════╝██╔══██╗██╔══██╗
+--  ██║░░╚═╝██████╔╝█████╗░░███████║░░░██║░░░█████╗░░  ░░░██║░░░███████║██████╔╝█████╗░░███████║██║░░██║
+--  ██║░░██╗██╔══██╗██╔══╝░░██╔══██║░░░██║░░░██╔══╝░░  ░░░██║░░░██╔══██║██╔══██╗██╔══╝░░██╔══██║██║░░██║
+--  ╚█████╔╝██║░░██║███████╗██║░░██║░░░██║░░░███████╗  ░░░██║░░░██║░░██║██║░░██║███████╗██║░░██║██████╔╝
+--  ░╚════╝░╚═╝░░╚═╝╚══════╝╚═╝░░╚═╝░░░╚═╝░░░╚══════╝  ░░░╚═╝░░░╚═╝░░╚═╝╚═╝░░╚═╝╚══════╝╚═╝░░╚═╝╚═════╝░
 
 CreateThread(function()
     while true do
@@ -345,6 +368,11 @@ end)
 CreateThread(function()
     while true do
         if isUiOpen then
+            if not cursorActive then
+                -- keep Escape from opening the pause menu while game input is passed through
+                DisableControlAction(0, 199, true)
+                DisableControlAction(0, 200, true)
+            end
             if #nearbyCache > 0 then
                 for _, entry in ipairs(nearbyCache) do
                     if DoesEntityExist(entry.ped) then
@@ -433,32 +461,9 @@ end)
 -- Open/close group UI
 exports('ToggleGroupUi', function(state)
     if state ~= nil then
-        isUiOpen = state
+        setUiOpen(state and true or false)
     else
-        isUiOpen = not isUiOpen
-    end
-
-    cursorActive = true
-    SetNuiFocus(isUiOpen, isUiOpen)
-
-    SendNUIMessage({
-        action = "toggle",
-        state = isUiOpen
-    })
-
-    if isUiOpen then
-        TriggerServerEvent("group:server:requestGroup")
-
-        SendNUIMessage({
-            action = "setMyId",
-            id = GetPlayerServerId(PlayerId())
-        })
-
-        Wait(100)
-
-        updateNearbyPlayers()
-    else
-        collectgarbage("collect")
+        toggleGroup()
     end
 end)
 
@@ -470,7 +475,7 @@ end)
 -- Open the group UI (no-op if already open)
 exports('OpenGroup', function()
     if not isUiOpen then
-        toggleGroup()
+        setUiOpen(true)
     end
 end)
 
