@@ -2,28 +2,37 @@ local groups = {}
 local playerGroup = {}
 local invitedPlayers = {}
 local maxgroupsize = 4
+local nextGroupId = 0
+local nextInviteToken = 0
 
-local function syncGroup(groupId, group)
+local function notify(target, message, success)
+    if success then
+        TriggerClientEvent('v-groups:client:SendNotification', target, message, 'success', 'bottom', '#141517', '#C1C2C5', 'check', 'green')
+    else
+        TriggerClientEvent('v-groups:client:SendNotification', target, message, 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+    end
+end
+
+local function getLeaderId(groupId)
+    local group = groups[groupId]
+    return group and group[1] and group[1].id
+end
+
+local function syncGroup(groupId)
+    local group = groups[groupId]
     if not group or #group == 0 then return end
     local leaderId = group[1].id
-    for _, v in ipairs(group) do
-        if playerGroup[v.id] == groupId then
-            leaderId = group[1].id
-            break
-        end
-    end
-    local xPlayer = GetPlayer(leaderId)
-    local leaderName = xPlayer and
-        (xPlayer.PlayerData.charinfo.firstname .. " " .. xPlayer.PlayerData.charinfo.lastname)
-        or GetPlayerName(leaderId)
     local formatted = {}
-    for _, v in ipairs(group) do
+    for _, member in ipairs(group) do
+        -- refresh names, the character may have loaded after the group was created
+        member.name = GetCharName(member.id)
         table.insert(formatted, {
-            id = v.id,
-            name = v.name,
-            leader = (v.id == leaderId)
+            id = member.id,
+            name = member.name,
+            leader = (member.id == leaderId)
         })
     end
+    local leaderName = group[1].name
     for _, member in ipairs(group) do
         playerGroup[member.id] = groupId
         TriggerClientEvent(
@@ -38,52 +47,133 @@ local function syncGroup(groupId, group)
     end
 end
 
+-- Creates a new solo group with src as the host
+local function createGroup(src)
+    nextGroupId = nextGroupId + 1
+    local groupId = nextGroupId
+    groups[groupId] = {
+        { id = src, name = GetCharName(src) }
+    }
+    playerGroup[src] = groupId
+    return groupId
+end
+
+-- Returns the player's group, creating a solo one if they have none
+local function ensureGroup(src)
+    local groupId = playerGroup[src]
+    if groupId and groups[groupId] then
+        return groupId
+    end
+    playerGroup[src] = nil
+    return createGroup(src)
+end
+
+-- Removes src from their group and syncs whoever is left
+local function removeFromGroup(src)
+    local groupId = playerGroup[src]
+    playerGroup[src] = nil
+    if not groupId then return end
+    local group = groups[groupId]
+    if not group then return end
+    for i = #group, 1, -1 do
+        if group[i].id == src then
+            table.remove(group, i)
+            break
+        end
+    end
+    if #group == 0 then
+        groups[groupId] = nil
+    else
+        syncGroup(groupId)
+    end
+end
+
+-- Clears the pending invite sent to targetId and resets both players' invite buttons
+local function clearInvite(targetId)
+    local invite = invitedPlayers[targetId]
+    if not invite then return end
+    invitedPlayers[targetId] = nil
+    TriggerClientEvent("group:client:inviteStatus", invite.from, targetId, nil)
+    TriggerClientEvent("group:client:inviteStatus", targetId, invite.from, nil)
+end
+
+-- Cancels every invite sent by src (they left, were kicked or dropped)
+local function clearInvitesFrom(src)
+    for targetId, invite in pairs(invitedPlayers) do
+        if invite.from == src then
+            clearInvite(targetId)
+            TriggerClientEvent("group:client:inviteCancelled", targetId)
+        end
+    end
+end
+
+-- Resets the invite button for playerId on every member of the group
+local function resetStatusForGroup(groupId, playerId)
+    local group = groups[groupId]
+    if not group then return end
+    for _, member in ipairs(group) do
+        TriggerClientEvent("group:client:inviteStatus", member.id, playerId, nil)
+    end
+end
+
+-- Takes src out of their group and puts them in a fresh solo group as host
+local function moveToOwnGroup(src)
+    local oldGroupId = playerGroup[src]
+    clearInvitesFrom(src)
+    removeFromGroup(src)
+    resetStatusForGroup(oldGroupId, src)
+    local groupId = createGroup(src)
+    TriggerClientEvent("group:client:leftGroup", src)
+    syncGroup(groupId)
+    return oldGroupId
+end
+
+
 RegisterNetEvent("group:server:getNearbyName", function(targetId)
     local src = source
-    local Player = GetPlayer(targetId)
-    if not Player then return end
-    local charinfo = Player.PlayerData.charinfo
-    local fullName = charinfo.firstname .. " " .. charinfo.lastname
+    targetId = tonumber(targetId)
+    if not targetId or not GetPlayerName(targetId) then return end
     TriggerClientEvent(
         "group:client:receiveNearbyName",
         src,
         targetId,
-        fullName
+        GetCharName(targetId)
     )
 end)
 
 
 RegisterNetEvent("group:server:invitePlayer", function(targetId)
     local src = source
-    if targetId == src then return end
+    targetId = tonumber(targetId)
+    if not targetId or targetId == src then return end
+    if not IsPlayerLoaded(src) or not IsPlayerLoaded(targetId) then return end
 
-    local Player = GetPlayer(src)
-    if not Player then return end
-    local charinfo = Player.PlayerData.charinfo
-    local fullName = charinfo.firstname .. " " .. charinfo.lastname
+    local fullName = GetCharName(src)
+    local targetfullName = GetCharName(targetId)
 
-    local targetPlayer = GetPlayer(targetId)
-    if not targetPlayer then return end
-    local tcharinfo = targetPlayer.PlayerData.charinfo
-    local targetfullName = tcharinfo.firstname .. " " .. tcharinfo.lastname
+    local groupId = ensureGroup(src)
+    local group = groups[groupId]
 
-    if not playerGroup[src] then
-        playerGroup[src] = src
-        groups[src] = {
-            { id = src, name = fullName }
-        }
-    end
-
-    local groupId = playerGroup[src]
-    local group = groups[groupId] or {}
+    if playerGroup[targetId] == groupId then return end
 
     if #group >= maxgroupsize then
-        TriggerClientEvent('v-groups:client:SendNotification', src, 'Your group is full', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+        notify(src, 'Your group is full', false)
         return
     end
 
-    invitedPlayers[targetId] = { from = src, groupId = groupId }
-    TriggerClientEvent('v-groups:client:SendNotification', src, 'You have invited '.. targetfullName, 'success', 'bottom', '#141517', '#C1C2C5', 'check', 'green')
+    local existing = invitedPlayers[targetId]
+    if existing then
+        if existing.from ~= src then
+            notify(src, targetfullName .. ' already has a pending invite', false)
+        end
+        return
+    end
+
+    nextInviteToken = nextInviteToken + 1
+    local token = nextInviteToken
+    invitedPlayers[targetId] = { from = src, groupId = groupId, token = token }
+
+    notify(src, 'You have invited ' .. targetfullName, true)
     TriggerClientEvent(
         "group:client:receiveInvite",
         targetId,
@@ -93,281 +183,152 @@ RegisterNetEvent("group:server:invitePlayer", function(targetId)
     )
     TriggerClientEvent("group:client:inviteStatus", src, targetId, "invited")
     TriggerClientEvent("group:client:inviteStatus", targetId, src, "invited")
+
+    SetTimeout((Config.InviteTimeout or 30) * 1000, function()
+        local invite = invitedPlayers[targetId]
+        if invite and invite.token == token then
+            clearInvite(targetId)
+            TriggerClientEvent("group:client:inviteCancelled", targetId)
+            notify(src, targetfullName .. ' did not respond to your invite', false)
+        end
+    end)
 end)
+
 
 RegisterNetEvent("group:server:requestGroup", function()
     local src = source
-    local groupId = playerGroup[src] or src
-    local group = groups[groupId]
-    if not group or #group == 0 then
-        group = {
-            { id = src, name = GetPlayerName(src) or "Unknown" }
-        }
-        groups[groupId] = group
-        playerGroup[src] = groupId
-    end
-    local leaderId = group[1] and group[1].id
-    for _, v in ipairs(group) do
-        playerGroup[v.id] = groupId
-    end
-    local xPlayer = GetPlayer(leaderId)
-    local leaderName = "Unknown"
-    if xPlayer then
-        local c = xPlayer.PlayerData.charinfo
-        leaderName = (c.firstname or "Unknown") .. " " .. (c.lastname or "")
-    else
-        leaderName = GetPlayerName(leaderId) or "Unknown"
-    end
-    local formatted = {}
-    for _, v in ipairs(group) do
-        table.insert(formatted, {
-            id = v.id,
-            name = v.name or GetPlayerName(v.id) or "Unknown",
-            leader = (v.id == leaderId)
-        })
-    end
-    TriggerClientEvent("group:client:updateGroup", src, formatted, leaderId, leaderName, maxgroupsize, groupId)
+    syncGroup(ensureGroup(src))
 end)
 
 
-RegisterNetEvent("group:server:acceptInvite", function(targetId)
+RegisterNetEvent("group:server:acceptInvite", function()
     local src = source
     local invite = invitedPlayers[src]
-    if not invite or invite.groupId ~= targetId or invite.from == src then
+    if not invite then return end
+    clearInvite(src)
+
+    local groupId = invite.groupId
+    local group = groups[groupId]
+
+    -- the inviter must still be in the group they invited us to
+    if not group or playerGroup[invite.from] ~= groupId then
+        notify(src, 'That invite is no longer valid', false)
         return
     end
 
-    local group = groups[targetId]
-    if not group then
-        invitedPlayers[src] = nil
-        return
-    end
+    if playerGroup[src] == groupId then return end
 
     if #group >= maxgroupsize then
-        invitedPlayers[src] = nil
-        TriggerClientEvent('v-groups:client:SendNotification', src, 'That group is full', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+        notify(src, 'That group is full', false)
         return
     end
 
-    local Player = GetPlayer(src)
-    if not Player then return end
-    local charinfo = Player.PlayerData.charinfo
-    local fullName = charinfo.firstname .. " " .. charinfo.lastname
+    local fullName = GetCharName(src)
 
     local oldGroupId = playerGroup[src]
-    if oldGroupId and oldGroupId ~= targetId then
-        local oldGroup = groups[oldGroupId]
-        if oldGroup then
-            for i = #oldGroup, 1, -1 do
-                if oldGroup[i].id == src then
-                    table.remove(oldGroup, i)
-                    break
-                end
-            end
-            if #oldGroup == 0 then
-                groups[oldGroupId] = nil
-            else
-                syncGroup(oldGroupId, oldGroup)
-            end
-        end
-    end
+    clearInvitesFrom(src)
+    removeFromGroup(src)
+    resetStatusForGroup(oldGroupId, src)
 
-    playerGroup[src] = targetId
     table.insert(group, {
         id = src,
         name = fullName
     })
-    invitedPlayers[src] = nil
-    syncGroup(targetId, group)
+    playerGroup[src] = groupId
+    syncGroup(groupId)
 
-    TriggerClientEvent('v-groups:client:SendNotification', targetId, fullName .. ' has joined the group', 'success', 'bottom', '#141517', '#C1C2C5', 'check', 'green')
-    TriggerClientEvent('v-groups:client:SendNotification', src, 'You have joined the group', 'success', 'bottom', '#141517', '#C1C2C5', 'check', 'green')
+    for _, member in ipairs(group) do
+        if member.id ~= src then
+            notify(member.id, fullName .. ' has joined the group', true)
+        end
+    end
+    notify(src, 'You have joined the group', true)
 end)
 
 
-RegisterNetEvent("group:server:declineInvite", function(inviterId)
+RegisterNetEvent("group:server:declineInvite", function()
     local src = source
-
     local invite = invitedPlayers[src]
-    if invite then
-        inviterId = invite.from
-    end
-
-    invitedPlayers[src] = nil
-
-    if not inviterId then return end
-
-    TriggerClientEvent(
-        "group:client:inviteStatus",
-        inviterId,
-        src,
-        "invite"
-    )
-
-    TriggerClientEvent(
-        "group:client:inviteStatus",
-        src,
-        inviterId,
-        "invite"
-    )
-
-    local targetPlayer = GetPlayer(src)
-    local targetfullName = "Player"
-    if targetPlayer then
-        local tcharinfo = targetPlayer.PlayerData.charinfo
-        targetfullName = tcharinfo.firstname .. " " .. tcharinfo.lastname
-    end
-    TriggerClientEvent('v-groups:client:SendNotification', inviterId, targetfullName .. ' declined invitation', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+    if not invite then return end
+    clearInvite(src)
+    notify(invite.from, GetCharName(src) .. ' declined invitation', false)
 end)
 
 
 RegisterNetEvent("group:server:kickPlayer", function(targetId)
     local src = source
-    if targetId == src then return end
+    targetId = tonumber(targetId)
+    if not targetId or targetId == src then return end
 
     local groupId = playerGroup[src]
-    if not groupId then return end
-    local group = groups[groupId]
-    if not group or not group[1] then return end
-    local leaderId = group[1].id
-    if src ~= leaderId then return end
+    if not groupId or getLeaderId(groupId) ~= src then return end
+    if playerGroup[targetId] ~= groupId then return end
 
-    local removed = false
-    for i = #group, 1, -1 do
-        if group[i].id == targetId then
-            table.remove(group, i)
-            removed = true
-            break
-        end
-    end
-    if not removed then return end
+    moveToOwnGroup(targetId)
 
-    TriggerClientEvent(
-        'group:client:inviteStatus',
-        src,
-        targetId,
-        'invite'
-    )
-    TriggerClientEvent("group:client:kicked", targetId)
-    invitedPlayers[targetId] = nil
-    playerGroup[targetId] = nil
+    local fullName = GetCharName(src)
+    local targetfullName = GetCharName(targetId)
 
-    syncGroup(groupId, group)
-
-    local Player = GetPlayer(src)
-    local fullName = "Host"
-    if Player then
-        local tcharinfo = Player.PlayerData.charinfo
-        fullName = tcharinfo.firstname .. " " .. tcharinfo.lastname
-    end
-
-    local targetPlayer = GetPlayer(targetId)
-    local targetfullName = "Player"
-    if targetPlayer then
-        local tcharinfo = targetPlayer.PlayerData.charinfo
-        targetfullName = tcharinfo.firstname .. " " .. tcharinfo.lastname
-    end
-
-    TriggerClientEvent('v-groups:client:SendNotification', targetId, fullName .. ' has kicked you from the group', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
-    TriggerClientEvent('v-groups:client:SendNotification', src, 'You have kicked ' .. targetfullName ..' from the group', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+    notify(targetId, fullName .. ' has kicked you from the group', false)
+    notify(src, 'You have kicked ' .. targetfullName .. ' from the group', false)
 end)
 
 
 RegisterNetEvent("group:server:leaveGroup", function()
     local src = source
     local groupId = playerGroup[src]
-    if not groupId then return end
-    local group = groups[groupId]
-    if not group then return end
-    for i = #group, 1, -1 do
-        if group[i].id == src then
-            table.remove(group, i)
-            break
-        end
-    end
-    playerGroup[src] = nil
-    invitedPlayers[src] = nil
-    if #group == 0 then
-        groups[groupId] = nil
-        return
-    end
-    local newLeaderId = group[1].id
-    local formatted = {}
-    for _, v in ipairs(group) do
-        table.insert(formatted, {
-            id = v.id,
-            name = v.name,
-            leader = (v.id == newLeaderId)
-        })
-    end
-    groups[groupId] = group
+    local group = groupId and groups[groupId]
+    -- a solo host is already in their own group, nothing to leave
+    if not group or #group <= 1 then return end
+
+    moveToOwnGroup(src)
+
+    local targetfullName = GetCharName(src)
     for _, member in ipairs(group) do
-        playerGroup[member.id] = groupId
+        notify(member.id, targetfullName .. ' has left the group', false)
     end
-    local xPlayer = GetPlayer(newLeaderId)
-    local leaderName = xPlayer and
-        (xPlayer.PlayerData.charinfo.firstname .. " " .. xPlayer.PlayerData.charinfo.lastname)
-        or GetPlayerName(newLeaderId)
-
-
-
-    local targetPlayer = GetPlayer(src)
-    local targetfullName = "Player"
-    if targetPlayer then
-        local tcharinfo = targetPlayer.PlayerData.charinfo
-        targetfullName = tcharinfo.firstname .. " " .. tcharinfo.lastname
-    end
-
-    for _, member in ipairs(group) do
-        TriggerClientEvent(
-            "group:client:updateGroup",
-            member.id,
-            formatted,
-            newLeaderId,
-            leaderName,
-            maxgroupsize,
-            groupId
-        )
-    end
-
-    TriggerClientEvent("group:client:leftGroup", src)
-    invitedPlayers[src] = nil
-    syncGroup(groupId, group)
-    TriggerClientEvent('v-groups:client:SendNotification', src, 'You have left the group', 'error', 'bottom', '#141517', '#C1C2C5', 'x', 'red')
+    notify(src, 'You have left the group', false)
 end)
 
 
 AddEventHandler('playerDropped', function()
     local src = source
 
-    invitedPlayers[src] = nil
-    for target, invite in pairs(invitedPlayers) do
-        if type(invite) == "table" and invite.from == src then
-            invitedPlayers[target] = nil
-        end
-    end
+    clearInvite(src)
+    clearInvitesFrom(src)
 
     local groupId = playerGroup[src]
-    if not groupId then return end
+    removeFromGroup(src)
+    resetStatusForGroup(groupId, src)
+end)
 
-    local group = groups[groupId]
-    playerGroup[src] = nil
-    if not group then return end
 
-    for i = #group, 1, -1 do
-        if group[i].id == src then
-            table.remove(group, i)
-            break
-        end
+-- Character logout (multicharacter): the next character starts in a fresh group
+local function onCharacterUnload(src)
+    src = tonumber(src)
+    if not src or not playerGroup[src] then return end
+    if invitedPlayers[src] then
+        clearInvite(src)
+        TriggerClientEvent("group:client:inviteCancelled", src)
     end
+    moveToOwnGroup(src)
+end
 
-    if #group == 0 then
-        groups[groupId] = nil
-        return
+AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
+    onCharacterUnload(src or source)
+end)
+
+AddEventHandler('esx:playerLogout', function(src)
+    onCharacterUnload(src or source)
+end)
+
+
+-- Put everyone already online into their own group when the resource starts
+AddEventHandler('onResourceStart', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    for _, id in ipairs(GetPlayers()) do
+        syncGroup(ensureGroup(tonumber(id)))
     end
-
-    groups[groupId] = group
-    syncGroup(groupId, group)
 end)
 
 
@@ -384,8 +345,6 @@ end)
 
 -- Get full group table
 exports('GetGroupMembers', function(groupId)
-    groupId = groupId or playerGroup[source]
-
     if not groupId then
         return {}
     end
@@ -395,31 +354,18 @@ end)
 
 -- Get leader id
 exports('GetGroupLeader', function(groupId)
-    local group = groups[groupId]
-
-    if not group or not group[1] then
-        return nil
-    end
-
-    return group[1].id
+    return getLeaderId(groupId)
 end)
 
 -- Get leader name
 exports('GetGroupLeaderName', function(groupId)
-    local leaderId = exports[GetCurrentResourceName()]:GetGroupLeader(groupId)
+    local leaderId = getLeaderId(groupId)
 
     if not leaderId then
         return nil
     end
 
-    local Player = GetPlayer(leaderId)
-
-    if Player then
-        local c = Player.PlayerData.charinfo
-        return c.firstname .. " " .. c.lastname
-    end
-
-    return GetPlayerName(leaderId)
+    return GetCharName(leaderId)
 end)
 
 -- Check if player is in group
@@ -435,13 +381,7 @@ exports('IsGroupLeader', function(playerId)
         return false
     end
 
-    local group = groups[groupId]
-
-    if not group or not group[1] then
-        return false
-    end
-
-    return group[1].id == playerId
+    return getLeaderId(groupId) == playerId
 end)
 
 -- Get group size
@@ -457,7 +397,7 @@ end)
 
 -- Check if group is full
 exports('IsGroupFull', function(groupId, maxSize)
-    maxSize = maxSize or 4
+    maxSize = maxSize or maxgroupsize
 
     local group = groups[groupId]
 
