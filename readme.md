@@ -28,11 +28,15 @@ Run `/groups` (bindable to a key like any other command) to open the panel. From
 
 ## Config
 
-`config/config.lua` has exactly one setting:
+`config/config.lua`:
 
 ```lua
-Config.Notification = 'ox' -- 'qb', 'ox', or 'gta'
+Config.Framework = 'auto_detect' -- 'auto_detect', 'qb', 'qbox', 'esx', 'standalone'
+Config.Notification = 'gta'      -- 'qb', 'ox' (needs ox_lib), or 'gta'
+Config.InviteTimeout = 30        -- seconds before an unanswered invite expires
 ```
+
+Every player is always in a group: when the resource starts, when they spawn or load a character, they're placed in their own group as host. Accepting an invite moves them into the inviter's group; leaving or being kicked puts them back in a fresh group of their own.
 
 The group size cap (4) isn't a config option on purpose — it's a single constant on the server (`maxgroupsize` in `server/main.lua`) so a modified client can never talk it into accepting a bigger group. If you genuinely need a different cap, change that one line.
 
